@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StrangerChat — Talk to Random People</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<style>
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:'Inter',sans-serif;background:#0b0e1a;color:#e2e8f0;min-height:100vh;}
+  .display{font-family:'Space Grotesk',sans-serif;}
+  .glow-btn{background:linear-gradient(135deg,#22d3ee,#a78bfa);transition:transform .2s,box-shadow .2s;}
+  .glow-btn:hover{transform:translateY(-2px);box-shadow:0 10px 30px -8px rgba(167,139,250,.7);}
+  .glow-btn:disabled{opacity:.4;cursor:not-allowed;transform:none;box-shadow:none;}
+  .danger-btn{background:linear-gradient(135deg,#ef4444,#f97316);transition:transform .2s,box-shadow .2s;}
+  .danger-btn:hover{transform:translateY(-2px);box-shadow:0 10px 30px -8px rgba(239,68,68,.6);}
+  .card{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.09);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);}
+  .msg{max-width:78%;padding:10px 14px;border-radius:16px;margin-bottom:10px;line-height:1.5;font-size:14.5px;word-wrap:break-word;animation:msgIn .3s ease both;}
+  .msg.you{background:linear-gradient(135deg,#22d3ee,#0ea5e9);color:#04121a;border-bottom-right-radius:4px;margin-left:auto;}
+  .msg.stranger{background:rgba(255,255,255,.09);color:#e2e8f0;border-bottom-left-radius:4px;}
+  .msg.sys{background:transparent;color:#64748b;font-size:12.5px;text-align:center;max-width:100%;padding:4px;font-style:italic;}
+  @keyframes msgIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+  @keyframes pulseDot{0%,100%{opacity:.3}50%{opacity:1}}
+  .typing span{display:inline-block;width:7px;height:7px;border-radius:50%;background:#94a3b8;margin-right:4px;animation:pulseDot 1.2s infinite;}
+  .typing span:nth-child(2){animation-delay:.2s;}
+  .typing span:nth-child(3){animation-delay:.4s;}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .spinner{width:42px;height:42px;border:3px solid rgba(167,139,250,.2);border-top-color:#a78bfa;border-radius:50%;animation:spin .9s linear infinite;}
+  .status-line{animation:fadeUp .5s ease both;}
+  @keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+  .mode-chip{cursor:pointer;transition:all .2s;border:1px solid rgba(255,255,255,.15);}
+  .mode-chip.active{background:linear-gradient(135deg,#22d3ee,#a78bfa);color:#0b0e1a;border-color:transparent;font-weight:600;}
+  .video-box{background:#000;border-radius:14px;position:relative;overflow:hidden;aspect-ratio:4/3;display:flex;align-items:center;justify-content:center;}
+  .video-box video{width:100%;height:100%;object-fit:cover;}
+  .orb{position:absolute;border-radius:50%;filter:blur(90px);opacity:.25;pointer-events:none;}
+  input:focus{outline:none;border-color:rgba(34,211,238,.6)!important;}
+  .err-banner{background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.4);color:#fca5a5;padding:12px 16px;border-radius:12px;font-size:13px;margin-bottom:18px;display:none;}
+  ::-webkit-scrollbar{width:6px;}::-webkit-scrollbar-thumb{background:rgba(167,139,250,.4);border-radius:3px;}
+</style>
+</head>
+<body>
+<div style="position:relative;min-height:100vh;overflow:hidden;background:radial-gradient(ellipse at top,#151b3a 0%,#0b0e1a 55%);">
+  <div class="orb" style="width:380px;height:380px;background:#22d3ee;top:-100px;left:-80px;"></div>
+  <div class="orb" style="width:420px;height:420px;background:#a78bfa;bottom:-120px;right:-100px;"></div>
+
+  <div style="position:relative;max-width:960px;margin:0 auto;padding:32px 18px 60px;">
+
+    <header style="display:flex;align-items:center;justify-content:space-between;margin-bottom:28px;">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <div style="width:38px;height:38px;border-radius:11px;background:linear-gradient(135deg,#22d3ee,#a78bfa);display:flex;align-items:center;justify-content:center;font-weight:700;color:#0b0e1a;font-size:18px;">S</div>
+        <span class="display" style="font-size:20px;font-weight:700;">StrangerChat</span>
+      </div>
+      <span style="font-size:12px;color:#64748b;" id="onlineCount">● connecting…</span>
+    </header>
+
+    <div id="errBanner" class="err-banner"></div>
+
+    <!-- START SCREEN -->
+    <div id="startScreen" class="card" style="border-radius:22px;padding:36px 28px;text-align:center;">
+      <h1 class="display" style="font-size:clamp(26px,4.5vw,40px);font-weight:700;margin:0 0 10px;">You're now chatting with a random stranger</h1>
+      <p style="color:#94a3b8;margin:0 auto 26px;max-width:480px;line-height:1.6;font-size:15px;">
+        Meet someone new in seconds. Add your interests to be matched with people who like the same things.
+      </p>
+      <div style="margin-bottom:20px;text-align:left;">
+        <label style="display:block;font-size:12px;color:#94a3b8;margin-bottom:8px;letter-spacing:.05em;text-transform:uppercase;">Your interests (optional, comma separated)</label>
+        <input id="interests" type="text" placeholder="music, gaming, travel, photography..." style="width:100%;padding:13px 16px;border-radius:12px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);color:#e2e8f0;font-size:14px;">
+      </div>
+      <div style="display:flex;gap:10px;justify-content:center;margin-bottom:24px;flex-wrap:wrap;">
+        <div class="mode-chip active" data-mode="text" style="padding:10px 22px;border-radius:999px;font-size:14px;">Text chat</div>
+        <div class="mode-chip" data-mode="video" style="padding:10px 22px;border-radius:999px;font-size:14px;">Video chat (preview only)</div>
+      </div>
+      <button id="startBtn" class="glow-btn display" style="border:none;color:#0b0e1a;font-weight:700;font-size:16px;padding:15px 44px;border-radius:999px;cursor:pointer;">
+        Start chatting
+      </button>
+      <p style="font-size:11.5px;color:#475569;margin:18px 0 0;line-height:1.6;">
+        Be kind. Never share personal info. Users must be 18+.
+      </p>
+    </div>
+
+    <!-- CONNECTING SCREEN -->
+    <div id="connectScreen" class="card" style="display:none;border-radius:22px;padding:60px 28px;text-align:center;">
+      <div class="spinner" style="margin:0 auto 26px;"></div>
+      <h2 class="display" style="font-size:22px;font-weight:600;margin:0 0 8px;">Finding you a stranger...</h2>
+      <div id="statusLines" style="min-height:60px;color:#94a3b8;font-size:14px;"></div>
+      <button id="cancelBtn" style="margin-top:22px;padding:9px 22px;border-radius:999px;border:1px solid rgba(255,255,255,.2);background:transparent;color:#cbd5e1;font-size:13px;cursor:pointer;">Cancel</button>
+    </div>
+
+    <!-- CHAT SCREEN -->
+    <div id="chatScreen" style="display:none;">
+      <div id="videoRow" style="display:none;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;">
+        <div class="video-box card" id="youVideoBox">
+          <video id="youVideo" autoplay muted playsinline style="display:none;"></video>
+          <div id="youVideoPlaceholder" style="text-align:center;color:#64748b;padding:20px;">
+            <div style="font-size:34px;margin-bottom:8px;">&#128100;</div>
+            <p style="font-size:13px;margin:0;">Your camera (local preview)</p>
+            <button id="enableCamBtn" style="margin-top:10px;padding:7px 16px;border-radius:8px;border:1px solid rgba(34,211,238,.5);background:transparent;color:#22d3ee;font-size:12px;cursor:pointer;">Enable camera</button>
+          </div>
+          <span style="position:absolute;bottom:8px;left:10px;font-size:11px;background:rgba(0,0,0,.6);padding:3px 8px;border-radius:6px;color:#cbd5e1;">You</span>
+        </div>
+        <div class="video-box card">
+          <div style="text-align:center;color:#64748b;padding:20px;">
+            <div style="font-size:34px;margin-bottom:8px;">&#128100;</div>
+            <p style="font-size:13px;margin:0;">Stranger video not enabled in this version</p>
+          </div>
+          <span style="position:absolute;bottom:8px;left:10px;font-size:11px;background:rgba(0,0,0,.6);padding:3px 8px;border-radius:6px;color:#cbd5e1;">Stranger</span>
+        </div>
+      </div>
+
+      <div class="card" style="border-radius:18px;overflow:hidden;display:flex;flex-direction:column;height:520px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid rgba(255,255,255,.08);background:rgba(0,0,0,.2);">
+          <div style="display:flex;align-items:center;gap:10px;">
+            <span style="width:9px;height:9px;border-radius:50%;background:#34d399;display:inline-block;" id="connDot"></span>
+            <span class="display" style="font-weight:600;font-size:15px;">Stranger</span>
+          </div>
+          <div style="display:flex;gap:8px;">
+            <button id="stopBtn" class="danger-btn" style="border:none;color:#fff;font-weight:600;font-size:13px;padding:8px 18px;border-radius:999px;cursor:pointer;">Stop</button>
+            <button id="newBtn" class="glow-btn" style="display:none;border:none;color:#0b0e1a;font-weight:600;font-size:13px;padding:8px 18px;border-radius:999px;cursor:pointer;">New</button>
+          </div>
+        </div>
+        <div id="chatLog" style="flex:1;overflow-y:auto;padding:18px;display:flex;flex-direction:column;"></div>
+        <div id="typingRow" style="display:none;padding:0 18px 6px;">
+          <div class="typing" style="display:inline-flex;align-items:center;background:rgba(255,255,255,.09);padding:8px 14px;border-radius:16px;border-bottom-left-radius:4px;"><span></span><span></span><span></span></div>
+        </div>
+        <div style="padding:14px 18px;border-top:1px solid rgba(255,255,255,.08);display:flex;gap:10px;">
+          <input id="msgInput" type="text" placeholder="Say something..." style="flex:1;padding:12px 16px;border-radius:12px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);color:#e2e8f0;font-size:14px;" autocomplete="off" disabled>
+          <button id="sendBtn" class="glow-btn" style="border:none;color:#0b0e1a;font-weight:700;font-size:14px;padding:0 22px;border-radius:12px;cursor:pointer;" disabled>Send</button>
+        </div>
+      </div>
+    </div>
+
+    <footer style="text-align:center;margin-top:34px;color:#475569;font-size:12px;">
+      <p style="margin:0;">StrangerChat &middot; Real strangers, real-time, via Socket.IO. Video mode shows your local preview only.</p>
+    </footer>
+  </div>
+</div>
+
+<script>
+(function(){
+  // ============================================================
+  // SERVER URL: leave "" if this page is served by the same Node
+  // server (recommended). If you host the HTML separately on
+  // Netlify, put your backend URL here, e.g.
+  //   "https://strangerchat-abc.onrender.com"
+  // ============================================================
+  var SERVER_URL = "";
+
+  var socket = SERVER_URL ? io(SERVER_URL, { transports: ['websocket','polling'] }) : io();
+
+  var state = { mode:"text", connected:false, searching:false, typingTimer:null, stopTypingTimer:null };
+  var $ = function(id){ return document.getElementById(id); };
+  var startScreen=$("startScreen"), connectScreen=$("connectScreen"), chatScreen=$("chatScreen");
+  var chatLog=$("chatLog"), msgInput=$("msgInput"), typingRow=$("typingRow"), statusLines=$("statusLines");
+  var videoRow=$("videoRow"), errBanner=$("errBanner");
+
+  function showErr(msg){
+    errBanner.textContent = msg;
+    errBanner.style.display = "block";
+  }
+
+  // mode chips
+  document.querySelectorAll('.mode-chip').forEach(function(chip){
+    chip.onclick=function(){
+      document.querySelectorAll('.mode-chip').forEach(function(c){c.classList.remove('active');});
+      chip.classList.add('active');
+      state.mode=chip.getAttribute('data-mode');
+    };
+  });
+
+  function sysMsg(text){
+    var d=document.createElement('div');
+    d.className='msg sys';
+    d.textContent=text;
+    chatLog.appendChild(d);
+    chatLog.scrollTop=chatLog.scrollHeight;
+  }
+  function addMsg(who,text){
+    var d=document.createElement('div');
+    d.className='msg '+who;
+    d.textContent=text;
+    chatLog.appendChild(d);
+    chatLog.scrollTop=chatLog.scrollHeight;
+  }
+  function showTyping(){ typingRow.style.display="block"; chatLog.scrollTop=chatLog.scrollHeight; }
+  function hideTyping(){ typingRow.style.display="none"; }
+
+  function setInputEnabled(on){
+    msgInput.disabled=!on; $("sendBtn").disabled=!on;
+    if(on) msgInput.focus();
+  }
+
+  function connectingAnimation(interests){
+    statusLines.innerHTML="";
+    var steps=["Searching for a stranger...","Establishing secure connection...","Waiting for someone to join..."];
+    if(interests && interests.length) steps[0]="Matching with people into: "+interests.slice(0,3).join(', ')+"...";
+    var i=0;
+    function next(){
+      if(!state.searching) return;
+      if(i<steps.length){
+        var p=document.createElement('p');
+        p.className='status-line'; p.style.margin='4px 0'; p.textContent=steps[i];
+        statusLines.appendChild(p); i++;
+        setTimeout(next, 900+Math.random()*700);
+      } else {
+        var p=document.createElement('p');
+        p.className='status-line'; p.style.margin='14px 0 0'; p.style.color='#22d3ee';
+        p.textContent="Still searching — the more people online, the faster it matches…";
+        statusLines.appendChild(p);
+      }
+    }
+    next();
+  }
+
+  function startSearch(){
+    if(!socket.connected){ showErr("Not connected to the server. Check your internet / SERVER_URL and refresh."); return; }
+    errBanner.style.display="none";
+    startScreen.style.display="none";
+    chatScreen.style.display="none";
+    connectScreen.style.display="block";
+    state.searching=true;
+    var raw = $("interests").value.trim();
+    var interests = raw ? raw.split(',').map(function(s){return s.trim();}).filter(Boolean) : [];
+    connectingAnimation(interests);
+    socket.emit('join', { interests: interests });
+  }
+
+  $("startBtn").onclick = startSearch;
+  $("newBtn").onclick = startSearch;
+
+  $("cancelBtn").onclick = function(){
+    state.searching=false;
+    socket.emit('leave');
+    connectScreen.style.display="none";
+    startScreen.style.display="block";
+  };
+
+  function enterChat(){
+    state.searching=false;
+    state.connected=true;
+    connectScreen.style.display="none";
+    chatScreen.style.display="block";
+    if(state.mode==="video"){ videoRow.style.display="grid"; } else { videoRow.style.display="none"; }
+    chatLog.innerHTML="";
+    $("newBtn").style.display="none";
+    $("stopBtn").style.display="inline-block";
+    $("connDot").style.background="#34d399";
+    setInputEnabled(true);
+    sysMsg("You're now chatting with a random stranger. Say hi!");
+  }
+
+  function endChat(reason){
+    state.connected=false;
+    hideTyping();
+    clearTimeout(state.stopTypingTimer);
+    sysMsg(reason);
+    setInputEnabled(false);
+    $("connDot").style.background="#64748b";
+    $("stopBtn").style.display="none";
+    $("newBtn").style.display="inline-block";
+  }
+
+  $("stopBtn").onclick = function(){
+    if(!state.connected) return;
+    socket.emit('leave');
+    endChat("You have disconnected.");
+  };
+
+  function send(){
+    var text=msgInput.value.trim();
+    if(!text || !state.connected) return;
+    addMsg("you", text);
+    socket.emit('chat:message', text);
+    socket.emit('stop:typing');
+    msgInput.value="";
+  }
+  $("sendBtn").onclick=send;
+  msgInput.addEventListener('keydown', function(e){ if(e.key==='Enter') send(); });
+
+  // typing indicator -> partner
+  msgInput.addEventListener('input', function(){
+    if(!state.connected) return;
+    socket.emit('typing');
+    clearTimeout(state.stopTypingTimer);
+    state.stopTypingTimer = setTimeout(function(){ socket.emit('stop:typing'); }, 1500);
+  });
+
+  // ---------- socket events ----------
+  socket.on('connect', function(){
+    errBanner.style.display="none";
+  });
+  socket.on('disconnect', function(){
+    $("onlineCount").textContent = "● offline";
+    if(state.connected) endChat("Connection lost — you have been disconnected.");
+    showErr("Lost connection to the server. Refresh the page to reconnect.");
+  });
+  socket.on('connect_error', function(){
+    showErr("Cannot reach the chat server. If you hosted this page on Netlify separately, set SERVER_URL in the code to your backend URL.");
+    $("onlineCount").textContent = "● server unreachable";
+  });
+  socket.on('online', function(n){
+    $("onlineCount").textContent = "● " + Number(n||0).toLocaleString() + " online";
+  });
+  socket.on('searching', function(){
+    // already on connect screen; animation keeps running
+  });
+  socket.on('search:timeout', function(){
+    state.searching=false;
+    connectScreen.style.display="none";
+    startScreen.style.display="block";
+    showErr("No one was available to chat right now. Try again in a moment — or share the site link with friends to get people online.");
+  });
+  socket.on('matched', enterChat);
+  socket.on('chat:message', function(text){
+    hideTyping();
+    addMsg("stranger", String(text||""));
+  });
+  socket.on('typing', showTyping);
+  socket.on('stop:typing', hideTyping);
+  socket.on('partner:left', function(){
+    if(state.connected) endChat("Stranger has disconnected.");
+  });
+
+  // local camera preview (video mode — local only)
+  $("enableCamBtn").onclick=function(){
+    if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){ alert("Camera not supported here."); return; }
+    navigator.mediaDevices.getUserMedia({video:true,audio:false}).then(function(stream){
+      var v=$("youVideo"); v.srcObject=stream; v.style.display="block";
+      $("youVideoPlaceholder").style.display="none";
+    }).catch(function(){ alert("Camera access blocked — allow it in browser settings."); });
+  };
+})();
+</script>
+</body>
+</html>
