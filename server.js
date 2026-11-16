@@ -1,5 +1,8 @@
-// StrangerChat — real random-stranger text chat
-// Node.js + Express + Socket.IO. One deploy serves both the site and the backend.
+// ============================================================
+//  LYNX CHAT v2 — Stranger Chat with Video + Voice + Country
+//  Drop-in upgrade: same Socket.IO events + country matching.
+//  Deploy whole folder to Render (free). One deploy = all works.
+// ============================================================
 const express = require('express');
 const http = require('http');
 const path = require('path');
@@ -8,22 +11,18 @@ const { Server } = require('socket.io');
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*', methods: ['GET', 'POST'] } });
-
 const PORT = process.env.PORT || 3000;
 
 // Serve the frontend (put index.html in /public)
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ---------- state ----------
-// waiting queue: [{ socketId, interests: [..], since: ms }]
+// waiting queue: [{ socketId, interests: Set, country, pref, since: ms }]
 let waiting = [];
-// pairs: socketId -> { partner: socketId, room: roomId }
+// pairs: socketId -> { partner: socketId }
 const pairs = new Map();
+const MAX_MSG = 2000;
 
-const MAX_MSG_LEN = 2000;
-const MAX_INTERESTS = 10;
-
-// ---------- helpers ----------
 function broadcastOnline() {
   io.emit('online', io.engine.clientsCount);
 }
@@ -35,7 +34,6 @@ function leaveCurrent(socket, notifyPartner) {
     io.to(p.partner).emit('partner:left');
     pairs.delete(p.partner);
   }
-  try { socket.leave(p.room); } catch (e) {}
   pairs.delete(socket.id);
 }
 
@@ -43,56 +41,67 @@ function removeFromWaiting(socketId) {
   waiting = waiting.filter(w => w.socketId !== socketId);
 }
 
-// Try to match a joining socket with someone in the waiting queue.
-// Prefers a partner with at least one shared interest; falls back to longest-waiting.
-function tryMatch(socket) {
-  const myInterests = new Set((socket.data.interests || []).map(s => String(s).toLowerCase().trim()).filter(Boolean));
-
-  let partner = null;
-  // pass 1: shared interest
-  for (const w of waiting) {
-    if (w.interests.some(i => myInterests.has(i))) { partner = w; break; }
+// Decide if two waiting entries are compatible given their country + pref.
+// pref: 'same' = only match same country; 'worldwide' = match anyone.
+function compatible(a, b) {
+  if (a.pref === 'same' || b.pref === 'same') {
+    return a.country && b.country && a.country === b.country;
   }
-  // pass 2: oldest waiting
-  if (!partner && waiting.length > 0) partner = waiting[0];
+  return true; // both worldwide
+}
+
+// Match a joining socket. Prefers shared interests + same country, else longest-waiting compatible.
+function tryMatch(socket) {
+  const myInts = new Set((socket.data.interests || []).map(s => String(s).toLowerCase().trim()).filter(Boolean));
+  const myCountry = socket.data.country || '';
+  const myPref = socket.data.pref || 'worldwide';
+
+  // 1) Best: compatible + shared interest
+  // 2) Good: compatible + same country (bonus)
+  // 3) Fallback: longest-waiting compatible
+  let partner = null;
+  for (const w of waiting) {
+    if (!compatible({ country: myCountry, pref: myPref }, w)) continue;
+    if (w.interests.size && [...w.interests].some(i => myInts.has(i))) { partner = w; break; }
+  }
+  if (!partner) {
+    for (const w of waiting) {
+      if (!compatible({ country: myCountry, pref: myPref }, w)) continue;
+      if (w.country && myCountry && w.country === myCountry) { partner = w; break; }
+    }
+  }
+  if (!partner) {
+    partner = waiting.find(w => compatible({ country: myCountry, pref: myPref }, w)) || null;
+  }
 
   if (!partner) {
-    waiting.push({ socketId: socket.id, interests: [...myInterests], since: Date.now() });
+    waiting.push({ socketId: socket.id, interests: myInts, country: myCountry, pref: myPref, since: Date.now() });
     io.to(socket.id).emit('searching');
-    return false;
+    return;
   }
 
   removeFromWaiting(partner.socketId);
   const partnerSocket = io.sockets.sockets.get(partner.socketId);
-  if (!partnerSocket || !partnerSocket.connected) {
-    // stale entry, retry match for this socket
-    return tryMatch(socket);
-  }
+  if (!partnerSocket || !partnerSocket.connected) return tryMatch(socket);
 
-  const room = 'room-' + socket.id + '-' + partner.socketId;
-  try { socket.join(room); partnerSocket.join(room); } catch (e) {}
+  pairs.set(socket.id, { partner: partner.socketId });
+  pairs.set(partner.socketId, { partner: socket.id });
 
-  pairs.set(socket.id, { partner: partner.socketId, room });
-  pairs.set(partner.socketId, { partner: socket.id, room });
-  socket.data.room = room;
-  partnerSocket.data.room = room;
-
-  io.to(socket.id).emit('matched');
-  io.to(partner.socketId).emit('matched');
-  return true;
+  // The older socket initiates the WebRTC offer. Tell each side the partner's country.
+  io.to(partner.socketId).emit('matched', { initiator: true,  partnerCountry: socket.data.country || '' });
+  io.to(socket.id).emit('matched',          { initiator: false, partnerCountry: partner.country || '' });
 }
 
-// ---------- socket events ----------
 io.on('connection', (socket) => {
   broadcastOnline();
 
   socket.on('join', (payload) => {
-    const interests = Array.isArray(payload && payload.interests)
-      ? payload.interests.slice(0, MAX_INTERESTS)
-      : [];
+    const p = payload || {};
+    const interests = Array.isArray(p.interests) ? p.interests.slice(0, 10) : [];
     socket.data.interests = interests;
-
-    leaveCurrent(socket, true);   // leave any existing chat, notify partner
+    socket.data.country = String(p.country || '').slice(0, 8);
+    socket.data.pref = (p.pref === 'same') ? 'same' : 'worldwide';
+    leaveCurrent(socket, true);
     removeFromWaiting(socket.id);
     tryMatch(socket);
   });
@@ -100,7 +109,7 @@ io.on('connection', (socket) => {
   socket.on('chat:message', (text) => {
     const p = pairs.get(socket.id);
     if (!p) return;
-    const clean = String(text == null ? '' : text).slice(0, MAX_MSG_LEN);
+    const clean = String(text == null ? '' : text).slice(0, MAX_MSG);
     if (!clean.trim()) return;
     io.to(p.partner).emit('chat:message', clean);
   });
@@ -109,10 +118,23 @@ io.on('connection', (socket) => {
     const p = pairs.get(socket.id);
     if (p) io.to(p.partner).emit('typing');
   });
-
   socket.on('stop:typing', () => {
     const p = pairs.get(socket.id);
     if (p) io.to(p.partner).emit('stop:typing');
+  });
+
+  // WebRTC signaling relay (video + voice)
+  socket.on('webrtc:offer', (offer) => {
+    const p = pairs.get(socket.id);
+    if (p) io.to(p.partner).emit('webrtc:offer', offer);
+  });
+  socket.on('webrtc:answer', (answer) => {
+    const p = pairs.get(socket.id);
+    if (p) io.to(p.partner).emit('webrtc:answer', answer);
+  });
+  socket.on('webrtc:ice', (candidate) => {
+    const p = pairs.get(socket.id);
+    if (p) io.to(p.partner).emit('webrtc:ice', candidate);
   });
 
   socket.on('leave', () => {
@@ -127,17 +149,15 @@ io.on('connection', (socket) => {
   });
 });
 
-// safety: drop waiting entries older than 5 minutes every 30s
+// Clean stale waiting entries every 30s
 setInterval(() => {
   const cutoff = Date.now() - 5 * 60 * 1000;
-  const before = waiting.length;
   waiting = waiting.filter(w => {
     if (w.since < cutoff) { io.to(w.socketId).emit('search:timeout'); return false; }
     return true;
   });
-  if (waiting.length !== before) broadcastOnline();
 }, 30000);
 
-server.listen(PORT, () => {
-  console.log('StrangerChat live on http://localhost:' + PORT);
+server.listen(PORT, '0.0.0.0', () => {
+  console.log('LYNX CHAT v2 live on http://localhost:' + PORT);
 });
